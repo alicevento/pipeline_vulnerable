@@ -1,0 +1,73 @@
+name: secure-pipeline
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]    # ✅ PRs sin secrets; revisiones antes de merge
+
+permissions:
+  contents: read            # ✅ Mínimos por defecto
+
+jobs:
+  build_and_test:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false   # ✅ No expone credenciales en checkout
+      - uses: actions/setup-node@v4
+        with: { node-version: 20, cache: npm }
+      - run: npm ci                    # ✅ Reproducible con lockfile
+      - run: npm run lint && npm test  # ✅ Fallo = corta pipeline
+
+  sast_scans:
+    runs-on: ubuntu-latest
+    needs: build_and_test
+    permissions:
+      security-events: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: github/codeql-action/init@v3
+        with: { languages: javascript-typescript }
+      - uses: github/codeql-action/analyze@v3
+
+  package_and_publish:
+    runs-on: ubuntu-latest
+    needs: [ build_and_test, sast_scans ]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build artifact (ejemplo)
+        run: npm run build
+      - name: Generate SBOM
+        uses: anchore/sbom-action@v0
+        with: { artifact-name: sbom.spdx.json }
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with: { name: webapp, path: dist/ }
+
+  approval_gate:
+    runs-on: ubuntu-latest
+    needs: package_and_publish
+    environment: production            # ✅ Requiere aprobación en Settings > Environments
+    steps:
+      - run: echo "Esperando aprobación de Release Manager…"
+
+  deploy_prod:
+    runs-on: ubuntu-latest
+    needs: approval_gate
+    steps:
+      # ✅ OIDC (sin llaves estáticas) + despliegue inmutable con artefacto
+      - uses: actions/checkout@v4
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::<ACCOUNT_ID>:role/GitHubOIDCDeployRole
+          aws-region: us-east-1
+      - uses: actions/download-artifact@v4
+        with: { name: webapp, path: ./dist }
+      - name: Deploy (ejemplo)
+        run: |
+          # Sube artefacto a S3/CodeDeploy/ECS, o usa systemd + Nginx si es EC2
+          echo "Deploy inmutable con artefacto descargado"

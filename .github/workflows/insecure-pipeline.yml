@@ -1,0 +1,61 @@
+name: insecure-pipeline          # ❌ Pipeline intencionalmente inseguro
+on:
+  push:
+    branches: [ "main" ]         # ❌ Despliega directo a prod en cada push
+  pull_request_target:           # ❌ Ejecuta código de forks con SECRETS disponibles (alto riesgo)
+    branches: [ "*" ]
+
+# ❌ Permisos excesivos (por defecto / write-all). No aplica principio de mínimo privilegio.
+permissions: write-all
+
+jobs:
+  build_and_test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout (con credenciales persistentes)
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: true   # ❌ Risco en forks/PRs
+
+      - name: Instalar herramientas desde internet sin verificación
+        run: |
+          # ❌ Descarga y ejecución a ciegas (supply chain)
+          curl -sSfL https://example.com/install.sh | bash
+
+      - name: Instalar dependencias sin lockfile
+        run: npm install              # ❌ Instala lo último disponible; resultados no reproducibles
+
+      - name: Ejecutar tests pero ignorar fallos
+        run: npm test
+        continue-on-error: true       # ❌ Los fallos no bloquean el pipeline
+
+      - name: Preparar clave SSH en disco
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.EC2_SSH_KEY }}  # ❌ Secrets disponibles en PR target
+        run: |
+          mkdir -p ~/.ssh
+          printf "%s" "$SSH_PRIVATE_KEY" > ~/.ssh/key.pem   # ❌ Escribe secreto en disco
+          chmod 600 ~/.ssh/key.pem
+
+  deploy_to_prod:
+    needs: build_and_test
+    runs-on: ubuntu-latest
+    if: always()                     # ❌ Despliega aunque el build/test haya fallado
+    steps:
+      - name: Checkout full history
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0             # ❌ Más de lo necesario (exposición de historia)
+
+      - name: Conectarse por SSH a EC2 y desplegar con git pull
+        uses: appleboy/ssh-action@master   # ❌ Acción de tercero sin pin por SHA (supply chain)
+        with:
+          host: ${{ secrets.EC2_IP }}
+          username: ec2-user
+          key: ${{ secrets.EC2_SSH_KEY }}
+          script: |
+            set -e
+            cd /var/www/app
+            git pull origin main          # ❌ Despliegue no inmutable; dependes del repo vivo
+            # ❌ Levantar servicio sin systemd, sin TLS, sin healthchecks
+            screen -dmS app sh -c 'sudo flask run --host=0.0.0.0 --port=80'
